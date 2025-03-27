@@ -3,64 +3,82 @@ import torch
 from data import get_dataset
 from models import get_model
 from trainer import get_trainer
+from utils import set_params, load_data, evaluate
+import random
+import numpy as np
 
+# 1. 参数加载：从 utils 中加载所有超参数。
+args = set_params()
+if torch.cuda.is_available():
+    device = torch.device("cuda:" + str(args.gpu))
+    torch.cuda.set_device(args.gpu)
+else:
+    device = torch.device("cpu")
 
 def main():
-    # 1. 解析命令行参数
-    parser = argparse.ArgumentParser(description="Heterogeneous Graph Neural Network Training")
-    parser.add_argument("--dataset", type=str, required=True, choices=["acm", "imdb", "dblp", "aminer"],
-                        help="Dataset to use (e.g., acm, imdb, dblp, aminer)")
-    parser.add_argument("--model", type=str, required=True, choices=["han", "hgt", "metapath2vec"],
-                        help="Model to use (e.g., han, hgt, metapath2vec)")
-    parser.add_argument("--task", type=str, default="node_classification",
-                        choices=["node_classification", "embedding_learning"],
-                        help="Task type (node_classification or embedding_learning)")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
-                        help="Device to run (e.g., cpu, cuda)")
-    parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=0.005, help="Learning rate")
-    parser.add_argument("--weight_decay", type=float, default=0.001, help="Weight decay")
-    args = parser.parse_args()
+    # 2. 数据加载：调用 utils/load_data.py 中的数据处理方法。
+    nei_index, feats, mps, pos, label, idx_train, idx_val, idx_test = \
+        load_data(args.dataset, args.ratio, args.type_num)
+
+    # nb_classes: 节点类别数。
+    nb_classes = label.shape[-1]
+    # feats_dim_list: 每种节点特征的维度。
+    feats_dim_list = [i.shape[1] for i in feats]
+    P = int(len(mps))
 
     # 2. 加载数据集
-    print(f"Loading dataset: {args.dataset}")
+    print("Dataset: ", args.dataset)
+    print("The number of meta-paths: ", P)
+
     data, metadata = get_dataset(name=args.dataset)
 
     # 3. 构建模型
     print(f"Building model: {args.model}")
-    model_params = {}
-    if args.model == "han" or args.model == "hgt":
-        model_params["metadata"] = metadata
-        model_params["in_channels"] = -1  # 自动检测输入维度
-        model_params["out_channels"] = len(set(data['movie'].y.tolist()))  # 类别数
-    elif args.model == "metapath2vec":
-        model_params["edge_index_dict"] = data.edge_index_dict
-        model_params["metapath"] = [["author", "writes", "paper"], ["paper", "cites", "paper"]]
 
-    model = get_model(name=args.model, **model_params)
+    # 啊啊啊明天看咋改，放main里还是params里啊啊啊啊感觉这里的data也得debug看看到底是不是符合的啊啊啊
+    metadata = {
+        'node_types': args.node_types,  # 节点类型
+        'edge_types': args.edge_types  # 边类型
+    }
 
-    # 4. 分配设备
+    # 分配设备
     device = torch.device(args.device)
     data = data.to(device)
 
-    # 5. 初始化 Trainer
-    print(f"Initializing trainer for task: {args.task}")
+    # 初始化 Trainer
+    model = get_model(
+        name=args.model,  # 模型类型 (e.g., "han", "hgt", "metapath2vec")
+        metadata=metadata,  # 异质图元数据
+        in_channels=feats_dim_list,  # 输入特征维度
+        out_channels=nb_classes,  # 输出类别数
+        hidden_channels=args.hidden_dim,  # 隐藏层维度
+        heads=args.num_heads,  # 注意力头数 (仅对 HAN 等适用)
+        num_layers=args.num_layers  # 模型层数 (适用于 HGT)
+    )
+
+    # 4. 初始化 Trainer。
     trainer = get_trainer(
         model=model,
-        data=data,
+        data={
+            'x_dict': feats,  # 特征字典
+            'edge_index_dict': mps,  # 元路径邻接矩阵
+            'label': label,  # 节点标签
+            'train_mask': idx_train,  # 训练集索引
+            'val_mask': idx_val,  # 验证集索引
+            'test_mask': idx_test  # 测试集索引
+        },
         device=device,
-        task_type=args.task,
+        task_type=args.task_type,  # 任务类型 ('node_classification', 'embedding_learning')
         lr=args.lr,
         weight_decay=args.weight_decay
     )
 
-    # 6. 训练并输出结果
-    print("Training...")
-    best_val_acc, best_test_acc = trainer.train(num_epochs=args.epochs)
-
-    # 7. 打印结果
-    print(f"Best Validation Accuracy: {best_val_acc:.4f}")
-    print(f"Best Test Accuracy: {best_test_acc:.4f}")
+    # 5. 模型训练与评估。
+    print("Start training...")
+    best_val_acc, best_test_acc = trainer.train(
+        num_epochs=args.epochs,
+        log_interval=args.log_interval
+    )
 
 
 if __name__ == "__main__":
